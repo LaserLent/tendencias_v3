@@ -20,3 +20,6 @@ rsa==4.9.1
 sgmllib3k==1.0.0
 uritemplate==4.2.0
 urllib3==2.5.0
+
+tzdata==2025.2
+pytz==2025.2
