@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -21,7 +22,7 @@ class NewsItem(BaseModel):
     category: Optional[str] = None
 
 DATA_PATH = pathlib.Path(__file__).resolve().parents[1] / "data" / "output.json"
-app = FastAPI(title="Tendencias API", version="0.1.4")
+app = FastAPI(title="Tendencias API", version="0.1.5")
 
 @app.on_event("startup")
 def _startup():
@@ -54,7 +55,6 @@ def _get(d: dict, *keys: str) -> str:
 def _safe_normalize(x: dict) -> Optional[dict]:
     if not isinstance(x, dict):
         return None
-    # Campos (admite ES y EN) + limpieza
     title = clean_text(_get(x, "title", "titulo"))
     url   = html.unescape(_get(x, "url", "link"))
     date  = _get(x, "date", "fecha")
@@ -62,7 +62,6 @@ def _safe_normalize(x: dict) -> Optional[dict]:
     category_raw = x.get("category") or x.get("categoria")
     category = clean_text(category_raw) or None
 
-    # Arregla URLs relativas de Reddit
     if url and not url.startswith("http"):
         if url.startswith("/r/"):
             url = "https://www.reddit.com" + url
@@ -95,9 +94,12 @@ def health():
         last_updated = datetime.fromtimestamp(mtime).isoformat()
     except Exception:
         last_updated = None
-    return {"status": "ok", "items_total": len(norm), "last_updated": last_updated}
+    return JSONResponse(
+        content={"status": "ok", "items_total": len(norm), "last_updated": last_updated},
+        media_type="application/json; charset=utf-8",
+    )
 
-@app.get("/items", response_model=List[NewsItem])
+@app.get("/items")
 def list_items(
     categoria: Optional[str] = Query(default=None),
     desde: Optional[str] = Query(default=None, description="Fecha ISO, ej: 2025-08-01T00:00:00"),
@@ -128,14 +130,13 @@ def list_items(
             t = texto.lower()
             data = [x for x in data if t in (x.get("title","").lower()) or t in (x.get("source","").lower())]
 
-        safe: List[NewsItem] = []
-        for x in data[:limit]:
-            try:
-                safe.append(NewsItem(**x))
-            except Exception as e:
-                print("VALIDATION_SKIP:", x, e)
-                continue
-        return safe
+        # Pydantic v2 -> dicts
+        try:
+            out = [NewsItem(**x).model_dump() for x in data[:limit]]
+        except Exception:
+            out = data[:limit]
+
+        return JSONResponse(content=out, media_type="application/json; charset=utf-8")
     except Exception as e:
         print("ITEMS_500:", repr(e))
-        return []
+        return JSONResponse(content=[], media_type="application/json; charset=utf-8")
