@@ -124,3 +124,52 @@ def guardar_json(noticias: Union[Iterable[Dict[str, Any]], Dict[str, Iterable[Di
         data_to_write = [_normalizar_noticia(i) for i in noticias]
     with p.open('w', encoding='utf-8') as f:
         json.dump(data_to_write, f, ensure_ascii=False, indent=2)
+# --- v2 de _parse_date: ISO + RFC2822; naive => Europe/Madrid; tz-aware => convertido a Europe/Madrid ---
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+from email.utils import parsedate_to_datetime
+
+def _parse_date_v2(fecha_raw):
+    if fecha_raw is None:
+        return None
+    try:
+        s = str(fecha_raw).strip()
+        if not s:
+            return None
+        # Z -> +00:00 para fromisoformat
+        s_iso = s.replace('Z', '+00:00')
+        dt = None
+        # 1) Intento ISO 8601
+        try:
+            dt = datetime.fromisoformat(s_iso)
+        except Exception:
+            dt = None
+        # 2) Intento RFC 2822 (RSS)
+        if dt is None:
+            try:
+                dt = parsedate_to_datetime(s)
+            except Exception:
+                dt = None
+        if dt is None:
+            return None
+
+        # 3) Normalización a Europe/Madrid
+        if ZoneInfo:
+            TZ_SP = ZoneInfo('Europe/Madrid')
+            if dt.tzinfo is None:
+                # naive => se asume hora local Europe/Madrid (SIN desplazamiento)
+                return dt.replace(tzinfo=TZ_SP)
+            else:
+                # tz-aware => convertir a Europe/Madrid
+                return dt.astimezone(TZ_SP)
+        else:
+            # Sin zoneinfo: devolver tal cual y evitar crash
+            return dt
+    except Exception:
+        return None
+
+# Aliasing: usamos la v2 como implementación por defecto
+_parse_date = _parse_date_v2
