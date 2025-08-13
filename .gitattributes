@@ -1,0 +1,29 @@
+﻿# Normalización por defecto (detección automática)
+* text=auto
+
+# Código: forzar LF en el repo (consistencia Linux/CI)
+*.py   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.cfg  text eol=lf
+*.ini  text eol=lf
+*.sh   text eol=lf
+
+# Scripts Windows: mantener CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binarios: sin transformación
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.pdf  binary
+*.zip  binary
+*.tar  binary
+*.tar.gz binary
