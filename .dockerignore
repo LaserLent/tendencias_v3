@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+.env
+.env.*
+*.sqlite3
+
+# VCS / herramientas
+.git/
+.gitignore
+htmlcov/
+.coverage
+pytest.ini
+tests/
+
+# SO / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Datos locales (se montarán si hace falta)
+data/output.json
