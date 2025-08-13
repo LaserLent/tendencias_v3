@@ -1,0 +1,9 @@
+﻿{
+  "TECNOLOGIA": ["IA","software","ciberseguridad","redes sociales","hardware"],
+  "ECONOMIA": ["inflación","empleo","mercados","empresas","startups"],
+  "SOCIEDAD": ["salud","educación","demografía","consumo","trabajo"],
+  "CULTURA": ["cine","música","arte","videojuegos","televisión"],
+  "POLITICA": ["gobierno","leyes","elecciones","UE","políticas públicas"],
+  "INTERNACIONAL": ["UE","geopolítica","conflictos","diplomacia","migración"],
+  "OTROS": []
+}
