@@ -23,3 +23,6 @@ urllib3==2.5.0
 
 tzdata==2025.2
 pytz==2025.2
+
+fastapi==0.116.1
+uvicorn==0.35.0
