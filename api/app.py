@@ -3,8 +3,10 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 import json, pathlib
+from core.text_clean import clean_text
+import html
 
-# Intento usar la canonicalización real; si falla, no rompemos
+# Intento usar la canonicalizaciÃ³n real; si falla, no rompemos
 try:
     from core.utils import canonicalize_url as _canon
 except Exception:
@@ -32,7 +34,7 @@ def _load_items() -> list:
     try:
         txt = DATA_PATH.read_text(encoding="utf-8")
         data = json.loads(txt)
-        # Por si alguien guardó como objeto con 'value'
+        # Por si alguien guardÃ³ como objeto con 'value'
         if isinstance(data, dict) and "value" in data and isinstance(data["value"], list):
             return data["value"]
         if isinstance(data, list):
@@ -55,11 +57,11 @@ def _safe_normalize(x: dict) -> Optional[dict]:
     if not isinstance(x, dict):
         return None
     # Acepta claves ES o EN
-    title = _get(x, "title", "titulo")
-    url = _get(x, "url", "link")
+    title = clean_text(_get(x, "title", "titulo"))
+    url = html.unescape(_get(x, "url", "link"))
     date = _get(x, "date", "fecha")
-    source = _get(x, "source", "fuente")
-    category = x.get("category") or x.get("categoria")
+    source = clean_text(_get(x, "source", "fuente"))
+    category = clean_text(x.get("category") or x.get("categoria")) or None
 
     # Arregla URLs relativas de Reddit
     if url and not url.startswith("http"):
@@ -73,7 +75,7 @@ def _safe_normalize(x: dict) -> Optional[dict]:
         except Exception:
             can = url
 
-    # Requisitos mínimos
+    # Requisitos mÃ­nimos
     if not (title and url and can and date and source):
         return None
 
@@ -128,7 +130,7 @@ def list_items(
             t = texto.lower()
             data = [x for x in data if t in (x.get("title","").lower()) or t in (x.get("source","").lower())]
 
-        # Validación final segura: cualquier item inválido se descarta sin 500
+        # ValidaciÃ³n final segura: cualquier item invÃ¡lido se descarta sin 500
         safe: List[NewsItem] = []
         for x in data[:limit]:
             try:
