@@ -1,0 +1,49 @@
+﻿@"
+# Python / Build
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual env
+.venv/
+venv/
+ENV/
+env/
+
+# IDE / Tools
+.vscode/
+.idea/
+.mypy_cache/
+.pytest_cache/
+.pytype/
+
+# Coverage
+.coverage*
+coverage.xml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config & secrets
+.env
+.env.*
+*.key
+*.pem
+!*.example
+
+# Logs / outputs
+logs/
+*.log
+data/output.json
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+"@ | Set-Content -Encoding utf8 .gitignore

@@ -1,0 +1,7 @@
+from config import EXCLUIR_POLITICA
+_EXCLUIR_POLITICA = [p.lower() for p in EXCLUIR_POLITICA]
+def filtrar_politica(titulo: str) -> bool:
+    if not titulo:
+        return False
+    t = titulo.lower()
+    return any(p in t for p in _EXCLUIR_POLITICA)
