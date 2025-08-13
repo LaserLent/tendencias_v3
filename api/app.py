@@ -4,8 +4,12 @@ from typing import List, Optional
 from datetime import datetime
 import json, pathlib
 
-# Usamos utils del proyecto para canonicalizar
-from core.utils import canonicalize_url
+# Intento usar la canonicalización real; si falla, no rompemos
+try:
+    from core.utils import canonicalize_url as _canon
+except Exception:
+    def _canon(u: str) -> str:
+        return u
 
 class NewsItem(BaseModel):
     title: str
@@ -16,15 +20,27 @@ class NewsItem(BaseModel):
     category: Optional[str] = None
 
 DATA_PATH = pathlib.Path(__file__).resolve().parents[1] / "data" / "output.json"
-app = FastAPI(title="Tendencias API", version="0.1.2")
+app = FastAPI(title="Tendencias API", version="0.1.3")
 
-def _load_items() -> list[dict]:
-    if DATA_PATH.exists():
-        try:
-            return json.loads(DATA_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-    return []
+@app.on_event("startup")
+def _startup():
+    print("ROUTES(boot):", [r.path for r in app.routes])
+
+def _load_items() -> list:
+    if not DATA_PATH.exists():
+        return []
+    try:
+        txt = DATA_PATH.read_text(encoding="utf-8")
+        data = json.loads(txt)
+        # Por si alguien guardó como objeto con 'value'
+        if isinstance(data, dict) and "value" in data and isinstance(data["value"], list):
+            return data["value"]
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as e:
+        print("LOAD_ERROR:", repr(e))
+        return []
 
 def _get(d: dict, *keys: str) -> str:
     for k in keys:
@@ -35,19 +51,25 @@ def _get(d: dict, *keys: str) -> str:
                 return s
     return ""
 
-def _safe_normalize(x: dict) -> dict | None:
+def _safe_normalize(x: dict) -> Optional[dict]:
     if not isinstance(x, dict):
         return None
-    # Acepta tanto claves EN como ES
+    # Acepta claves ES o EN
     title = _get(x, "title", "titulo")
     url = _get(x, "url", "link")
     date = _get(x, "date", "fecha")
     source = _get(x, "source", "fuente")
     category = x.get("category") or x.get("categoria")
+
+    # Arregla URLs relativas de Reddit
+    if url and not url.startswith("http"):
+        if url.startswith("/r/"):
+            url = "https://www.reddit.com" + url
+
     can = _get(x, "canonical_url")
     if not can and url:
         try:
-            can = canonicalize_url(url)
+            can = _canon(url)
         except Exception:
             can = url
 
@@ -64,6 +86,17 @@ def _safe_normalize(x: dict) -> dict | None:
         "category": category if (category is None or isinstance(category, str)) else str(category),
     }
 
+@app.get("/health")
+def health():
+    raw = _load_items()
+    norm = [y for y in (_safe_normalize(i) for i in raw) if y]
+    try:
+        mtime = DATA_PATH.stat().st_mtime
+        last_updated = datetime.fromtimestamp(mtime).isoformat()
+    except Exception:
+        last_updated = None
+    return {"status": "ok", "items_total": len(norm), "last_updated": last_updated}
+
 @app.get("/items", response_model=List[NewsItem])
 def list_items(
     categoria: Optional[str] = Query(default=None),
@@ -71,51 +104,39 @@ def list_items(
     texto: Optional[str] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000)
 ):
-    raw = _load_items()
-    data: list[dict] = []
-    for x in raw:
-        nx = _safe_normalize(x)
-        if nx:
-            data.append(nx)
-
-    if categoria:
-        c = categoria.lower()
-        data = [x for x in data if (x.get("category") or "").lower() == c]
-
-    if desde:
-        try:
-            dt_desde = datetime.fromisoformat(desde.replace("Z", "+00:00"))
-            def _parse_date(s: str):
-                try:
-                    return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
-                except Exception:
-                    return None
-            data = [x for x in data if (d := _parse_date(x.get("date"))) and d >= dt_desde]
-        except Exception:
-            pass
-
-    if texto:
-        t = texto.lower()
-        data = [x for x in data if t in (x.get("title","").lower()) or t in (x.get("source","").lower())]
-
-    safe: list[NewsItem] = []
-    for x in data:
-        try:
-            safe.append(NewsItem(**x))
-        except Exception:
-            continue
-
-    return safe[:limit]@app.get("/health")
-def health():
-    raw = _load_items()
-    normalized = []
-    for x in raw:
-        nx = _safe_normalize(x)
-        if nx:
-            normalized.append(nx)
     try:
-        mtime = DATA_PATH.stat().st_mtime
-        last_updated = datetime.fromtimestamp(mtime).isoformat()
-    except Exception:
-        last_updated = None
-    return {"status": "ok", "items_total": len(normalized), "last_updated": last_updated}
+        raw = _load_items()
+        data = [y for y in (_safe_normalize(i) for i in raw) if y]
+
+        if categoria:
+            c = categoria.lower()
+            data = [x for x in data if (x.get("category") or "").lower() == c]
+
+        if desde:
+            try:
+                dt_desde = datetime.fromisoformat(desde.replace("Z", "+00:00"))
+                def _pd(s: str):
+                    try:
+                        return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+                    except Exception:
+                        return None
+                data = [x for x in data if (d := _pd(x.get("date"))) and d >= dt_desde]
+            except Exception:
+                pass
+
+        if texto:
+            t = texto.lower()
+            data = [x for x in data if t in (x.get("title","").lower()) or t in (x.get("source","").lower())]
+
+        # Validación final segura: cualquier item inválido se descarta sin 500
+        safe: List[NewsItem] = []
+        for x in data[:limit]:
+            try:
+                safe.append(NewsItem(**x))
+            except Exception as e:
+                print("VALIDATION_SKIP:", x, e)
+                continue
+        return safe
+    except Exception as e:
+        print("ITEMS_500:", repr(e))
+        return []
