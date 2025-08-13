@@ -47,3 +47,5 @@ data/output.json
 *.tar
 *.tar.gz
 "@ | Set-Content -Encoding utf8 .gitignore
+
+!.coveragerc
