@@ -105,4 +105,17 @@ def list_items(
         except Exception:
             continue
 
-    return safe[:limit]
+    return safe[:limit]@app.get("/health")
+def health():
+    raw = _load_items()
+    normalized = []
+    for x in raw:
+        nx = _safe_normalize(x)
+        if nx:
+            normalized.append(nx)
+    try:
+        mtime = DATA_PATH.stat().st_mtime
+        last_updated = datetime.fromtimestamp(mtime).isoformat()
+    except Exception:
+        last_updated = None
+    return {"status": "ok", "items_total": len(normalized), "last_updated": last_updated}
