@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+from contextlib import asynccontextmanager
 import json, pathlib, html
 
 # Canonicalización y limpieza
@@ -22,11 +23,14 @@ class NewsItem(BaseModel):
     category: Optional[str] = None
 
 DATA_PATH = pathlib.Path(__file__).resolve().parents[1] / "data" / "output.json"
-app = FastAPI(title="Tendencias API", version="0.1.5")
 
-@app.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Hook de arranque: lista rutas registradas (útil para debug/ops)
     print("ROUTES(boot):", [r.path for r in app.routes])
+    yield
+
+app = FastAPI(title="Tendencias API", version="0.1.6", lifespan=lifespan)
 
 def _load_items() -> list:
     if not DATA_PATH.exists():
@@ -62,6 +66,7 @@ def _safe_normalize(x: dict) -> Optional[dict]:
     category_raw = x.get("category") or x.get("categoria")
     category = clean_text(category_raw) or None
 
+    # Repara URLs relativas de Reddit
     if url and not url.startswith("http"):
         if url.startswith("/r/"):
             url = "https://www.reddit.com" + url
@@ -73,7 +78,7 @@ def _safe_normalize(x: dict) -> Optional[dict]:
         except Exception:
             can = url
 
-    if not (title and url and can and date and source):
+    if not (title, url, can, date, source):
         return None
 
     return {
@@ -130,7 +135,6 @@ def list_items(
             t = texto.lower()
             data = [x for x in data if t in (x.get("title","").lower()) or t in (x.get("source","").lower())]
 
-        # Pydantic v2 -> dicts
         try:
             out = [NewsItem(**x).model_dump() for x in data[:limit]]
         except Exception:
