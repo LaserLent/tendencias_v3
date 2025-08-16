@@ -1,146 +1,142 @@
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import List, Optional
+# api/app.py
+from fastapi import FastAPI, Query, Request, HTTPException
+from typing import Optional
 from datetime import datetime
-from contextlib import asynccontextmanager
-import json, pathlib, html
+import hashlib, os, logging
 
-# Canonicalización y limpieza
+from api.helpers import (
+    DATA_PATH,
+    json_ok as _json,
+    not_modified as _not_modified,
+    load_items as _load_items,
+    query as _query,
+)
+
+# DB opcional (helpers ya hace fallback a JSON)
 try:
-    from core.utils import canonicalize_url as _canon
+    from core.db import get_stats
+    HAS_DB = True
 except Exception:
-    def _canon(u: str) -> str:
-        return u
-from core.text_clean import clean_text
+    HAS_DB = False
 
-class NewsItem(BaseModel):
-    title: str
-    url: str
-    canonical_url: str
-    date: str
-    source: str
-    category: Optional[str] = None
+# App y logging
+app = FastAPI(title="Tendencias API", version="0.1.7")
+logger = logging.getLogger("tendencias.api.app")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
-DATA_PATH = pathlib.Path(__file__).resolve().parents[1] / "data" / "output.json"
+# Seguridad básica
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Hook de arranque: lista rutas registradas (útil para debug/ops)
-    print("ROUTES(boot):", [r.path for r in app.routes])
-    yield
-
-app = FastAPI(title="Tendencias API", version="0.1.6", lifespan=lifespan)
-
-def _load_items() -> list:
-    if not DATA_PATH.exists():
-        return []
-    try:
-        txt = DATA_PATH.read_text(encoding="utf-8")
-        data = json.loads(txt)
-        if isinstance(data, dict) and "value" in data and isinstance(data["value"], list):
-            return data["value"]
-        if isinstance(data, list):
-            return data
-        return []
-    except Exception as e:
-        print("LOAD_ERROR:", repr(e))
-        return []
-
-def _get(d: dict, *keys: str) -> str:
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            s = str(v).strip()
-            if s:
-                return s
-    return ""
-
-def _safe_normalize(x: dict) -> Optional[dict]:
-    if not isinstance(x, dict):
-        return None
-    title = clean_text(_get(x, "title", "titulo"))
-    url   = html.unescape(_get(x, "url", "link"))
-    date  = _get(x, "date", "fecha")
-    source= clean_text(_get(x, "source", "fuente"))
-    category_raw = x.get("category") or x.get("categoria")
-    category = clean_text(category_raw) or None
-
-    # Repara URLs relativas de Reddit
-    if url and not url.startswith("http"):
-        if url.startswith("/r/"):
-            url = "https://www.reddit.com" + url
-
-    can = _get(x, "canonical_url")
-    if not can and url:
+# Auto-ingesta opcional al arrancar
+@app.on_event("startup")
+def _auto_ingest_on_start():
+    if os.getenv("AUTO_INGEST_ON_START", "0") == "1":
         try:
-            can = _canon(url)
+            from services.ingest import ingest_now
+            stats = ingest_now()
+            logger.info("AUTO_INGEST_ON_START OK %s", stats)
         except Exception:
-            can = url
-
-    if not (title, url, can, date, source):
-        return None
-
-    return {
-        "title": title,
-        "url": url,
-        "canonical_url": can,
-        "date": date,
-        "source": source,
-        "category": category,
-    }
+            logger.exception("AUTO_INGEST_ON_START FAILED")
 
 @app.get("/health")
 def health():
-    raw = _load_items()
-    norm = [y for y in (_safe_normalize(i) for i in raw) if y]
+    # 1) BD primero
+    if HAS_DB:
+        try:
+            s = get_stats()
+            logger.info(
+                "HEALTH_SOURCE=DB items_total=%s last_updated=%s",
+                s.get("items_total", 0),
+                s.get("last_updated")
+            )
+            return _json({
+                "status": "ok",
+                "items_total": s.get("items_total", 0),
+                "last_updated": s.get("last_updated"),
+            })
+        except Exception:
+            logger.exception("HEALTH_DB_FAILED")
+
+    # 2) Fallback JSON
+    items = _load_items()
+    items_total = len(items)
     try:
-        mtime = DATA_PATH.stat().st_mtime
-        last_updated = datetime.fromtimestamp(mtime).isoformat()
+        last_updated = datetime.fromtimestamp(DATA_PATH.stat().st_mtime).isoformat()
     except Exception:
         last_updated = None
-    return JSONResponse(
-        content={"status": "ok", "items_total": len(norm), "last_updated": last_updated},
-        media_type="application/json; charset=utf-8",
-    )
+    logger.info("HEALTH_SOURCE=JSON items_total=%d last_updated=%s", items_total, last_updated)
+    return _json({"status": "ok", "items_total": items_total, "last_updated": last_updated})
 
 @app.get("/items")
 def list_items(
+    request: Request,
     categoria: Optional[str] = Query(default=None),
-    desde: Optional[str] = Query(default=None, description="Fecha ISO, ej: 2025-08-01T00:00:00"),
+    # ⬇️ Tipamos como datetime para validar formato automáticamente (422 si no es ISO válido)
+    desde: Optional[datetime] = Query(default=None, description="Fecha ISO, ej: 2025-08-01T00:00:00+02:00"),
+    hasta: Optional[datetime] = Query(default=None, description="Fecha ISO inclusive, ej: 2025-08-07T23:59:59+02:00"),
+    fuente: Optional[str] = Query(default=None, description="Filtro exacto por fuente, ej: 'Xataka' o 'Reddit r/technology'"),
     texto: Optional[str] = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=1000)
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
 ):
+    # Normalizamos a ISO para _query/DB (o None si no viene)
+    ds = desde.isoformat() if desde else None
+    hs = hasta.isoformat() if hasta else None
+
     try:
-        raw = _load_items()
-        data = [y for y in (_safe_normalize(i) for i in raw) if y]
+        # 1) total real sin paginación
+        data_all = _query(
+            categoria=categoria,
+            desde=ds,
+            hasta=hs,
+            texto=texto,
+            fuente=fuente,
+            limit=10**9,   # “sin límite” práctico
+            offset=0,
+        )
+        total = len(data_all)
 
-        if categoria:
-            c = categoria.lower()
-            data = [x for x in data if (x.get("category") or "").lower() == c]
+        # 2) ventana paginada
+        window = data_all[offset: offset + limit]
+        out = [{
+            "title": x.get("title") or "",
+            "url": x.get("url") or "",
+            "canonical_url": x.get("canonical_url") or "",
+            "date": x.get("date") or "",
+            "source": x.get("source") or "",
+            "category": x.get("category"),
+        } for x in window]
 
-        if desde:
-            try:
-                dt_desde = datetime.fromisoformat(desde.replace("Z", "+00:00"))
-                def _pd(s: str):
-                    try:
-                        return datetime.fromisoformat((s or "").replace("Z", "+00:00"))
-                    except Exception:
-                        return None
-                data = [x for x in data if (d := _pd(x.get("date"))) and d >= dt_desde]
-            except Exception:
-                pass
+        # 3) ETag estable (incluye filtros normalizados y borde temporal de la ventana)
+        first_date = (window[0].get("date") if window else "") or ""
+        last_date  = (window[-1].get("date") if window else "") or ""
+        etag_raw = "|".join([
+            str(total), str(limit), str(offset),
+            categoria or "", ds or "", hs or "",
+            texto or "", fuente or "",
+            first_date, last_date
+        ])
+        etag = hashlib.md5(etag_raw.encode("utf-8")).hexdigest()
 
-        if texto:
-            t = texto.lower()
-            data = [x for x in data if t in (x.get("title","").lower()) or t in (x.get("source","").lower())]
+        inm = request.headers.get("If-None-Match")
+        if inm and inm == etag:
+            return _not_modified(etag)
 
-        try:
-            out = [NewsItem(**x).model_dump() for x in data[:limit]]
-        except Exception:
-            out = data[:limit]
-
-        return JSONResponse(content=out, media_type="application/json; charset=utf-8")
-    except Exception as e:
-        print("ITEMS_500:", repr(e))
-        return JSONResponse(content=[], media_type="application/json; charset=utf-8")
+        resp = _json(out)
+        resp.headers["X-Total-Count"] = str(total)
+        resp.headers["ETag"] = etag
+        resp.headers["Cache-Control"] = "public, max-age=60"
+        return resp
+    except Exception:
+        logger.exception("ITEMS_500")
+        raise HTTPException(status_code=500, detail="Internal server error")
