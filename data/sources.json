@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "name": "NASA",
+      "type": "rss",
+      "url": "https://www.nasa.gov/rss/dyn/breaking_news.rss",
+      "category": "CIENCIA",
+      "enabled": true,
+      "interval_minutes": 30
+    },
+    {
+      "name": "TechCrunch",
+      "type": "rss",
+      "url": "https://techcrunch.com/feed/",
+      "category": "TECNOLOGIA",
+      "enabled": true,
+      "interval_minutes": 30
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 # api/app.py
 from fastapi import FastAPI, Query, Request, HTTPException
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib, os, logging
 
 from api.helpers import (
@@ -11,6 +11,11 @@ from api.helpers import (
     load_items as _load_items,
     query as _query,
 )
+try:
+    from core.db import get_articles_count  # NUEVO
+    HAS_DB_COUNT = True                     # NUEVO
+except Exception:
+    HAS_DB_COUNT = False                    # NUEVO
 
 # DB opcional (helpers ya hace fallback a JSON)
 try:
@@ -76,7 +81,12 @@ def health():
         last_updated = None
     logger.info("HEALTH_SOURCE=JSON items_total=%d last_updated=%s", items_total, last_updated)
     return _json({"status": "ok", "items_total": items_total, "last_updated": last_updated})
-
+def _normalize_until(hasta: Optional[str]) -> Optional[str]:
+    if not hasta:
+        return None
+    if len(hasta) == 10 and hasta[4] == '-' and hasta[7] == '-':
+        return (datetime.strptime(hasta, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+    return hasta
 @app.get("/items")
 def list_items(
     request: Request,
@@ -94,20 +104,18 @@ def list_items(
     hs = hasta.isoformat() if hasta else None
 
     try:
-        # 1) total real sin paginación
-        data_all = _query(
-            categoria=categoria,
-            desde=ds,
-            hasta=hs,
-            texto=texto,
-            fuente=fuente,
-            limit=10**9,   # “sin límite” práctico
-            offset=0,
-        )
-        total = len(data_all)
+        window = _query(categoria, ds, hs, texto, fuente, limit=limit, offset=offset)  # FIX
 
-        # 2) ventana paginada
-        window = data_all[offset: offset + limit]
+        if HAS_DB_COUNT:  # NUEVO
+            total = get_articles_count(
+            category=categoria,
+            text=texto,
+            since=dS,
+            until=_normalize_until(hs),  # NUEVO: límite EXCLUSIVO
+            source=fuente,
+            )
+        else:  # NUEVO: fallback JSON (menos eficiente, pero solo si no hay DB)
+            total = len(_query(categoria, ds, hs, texto, fuente, limit=10**9, offset=0))
         out = [{
             "title": x.get("title") or "",
             "url": x.get("url") or "",

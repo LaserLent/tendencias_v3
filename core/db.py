@@ -148,14 +148,19 @@ def get_articles(
     *,
     category: Optional[str]=None,
     text: Optional[str]=None,
-    since: Optional[str]=None,     # ISO8601 (inclusive)
+    since: Optional[str]=None,         # ISO8601 (inclusive)
+    until: Optional[str]=None,         # NUEVO: límite EXCLUSIVO (normalizado en la API)
+    source: Optional[str]=None,        # filtro por fuente (igualdad, no LIKE)
+    offset: int=0,                     # paginación real en SQL
     limit: int=50,
     conn: Optional[sqlite3.Connection]=None
 ) -> Iterable[sqlite3.Row]:
     """
     Devuelve artículos con filtros básicos para la API.
-    - since: filtro mínimo por fecha ISO.
-    - text: LIKE en title (case-insensitive).
+    - since: filtro mínimo por fecha (ISO). Si la columna date es INTEGER, se convierte a epoch para comparar.
+    - until: límite EXCLUSIVO. Si la columna date es INTEGER, se convierte a epoch para comparar.  # NUEVO
+    - text: LIKE en title/source (case-insensitive).
+    - source: igualdad case-insensitive.
     """
     close_later = False
     if conn is None:
@@ -163,28 +168,48 @@ def get_articles(
     try:
         where = []
         params: Dict[str, Any] = {}
+
         if category:
             where.append("category = :category")
             params["category"] = category
+
         if since:
-            where.append("date >= :since")
-            params["since"] = since
+            # NUEVO: compara manzana con manzana (INTEGER epoch vs TEXT ISO)
+            where.append(
+                "date >= CASE WHEN typeof(date)='integer' THEN strftime('%s', :since) ELSE :since END"
+            )  # NUEVO
+            params["since"] = since  # NUEVO
+
+        if until:
+            # NUEVO: límite EXCLUSIVO, con conversión a epoch si la columna es INTEGER
+            where.append(
+                "date < CASE WHEN typeof(date)='integer' THEN strftime('%s', :until) ELSE :until END"
+            )  # NUEVO
+            params["until"] = until  # NUEVO
+
         if text:
             where.append("(LOWER(title) LIKE :text OR LOWER(IFNULL(source,'')) LIKE :text)")
             params["text"] = f"%{text.lower()}%"
 
+        if source is not None:
+            where.append("source = :source COLLATE NOCASE")  # NUEVO
+            params["source"] = source                         # NUEVO
+
         sql = "SELECT id, title, url, canonical_url, date, source, category FROM articles"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY (date IS NULL) ASC, date DESC, id DESC LIMIT :limit"
+        sql += " ORDER BY (date IS NULL) ASC, date DESC, id DESC "
+        sql += "LIMIT :limit OFFSET :offset"
 
+        params["offset"] = int(max(0, offset))
+        params["limit"]  = int(max(1, min(limit, 500)))
 
-        params["limit"] = int(max(1, min(limit, 500)))
         cur = conn.execute(sql, params)
         return cur.fetchall()
     finally:
         if close_later:
             conn.close()
+
 
 def get_stats(conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
     """

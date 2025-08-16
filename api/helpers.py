@@ -1,7 +1,7 @@
 # --- IMPORTS que usan las utilidades ---
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta 
 from fastapi.responses import JSONResponse, Response
 from typing import Optional, List, Dict
 import json, html
@@ -36,6 +36,15 @@ DATA_PATH = Path(
     os.getenv("TRENDS_DATA_PATH", str(Path(__file__).resolve().parents[1] / "data" / "output.json"))
 )
 JSON_MEDIA = "application/json; charset=utf-8"
+
+# NUEVO: normaliza 'hasta' para que 'YYYY-MM-DD' se convierta en el día siguiente (exclusivo)
+def _normalize_until(hasta: Optional[str]) -> Optional[str]:
+    if not hasta:
+        return None
+    if len(hasta) == 10 and hasta[4] == '-' and hasta[7] == '-':
+        d = datetime.strptime(hasta, "%Y-%m-%d").date()
+        return (d + timedelta(days=1)).isoformat()
+    return hasta
 
 def _parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
     if not s:
@@ -113,15 +122,15 @@ def _ts(s: Optional[str]) -> float:
 def _query(
     categoria: Optional[str],
     desde: Optional[str],
-    hasta: Optional[str],          # NUEVO
+    hasta: Optional[str],          
     texto: Optional[str],
-    fuente: Optional[str],         # NUEVO
+    fuente: Optional[str],         
     limit: int,
     offset: int
 ) -> list:
     data: list = []
     source = "UNKNOWN"
-
+    until = _normalize_until(hasta)   # NUEVO
     # 1) Intento DB primero (pedimos amplio y filtramos extra en Python)
     if HAS_DB:
         try:
@@ -129,7 +138,10 @@ def _query(
                 category=categoria,
                 text=texto,
                 since=desde,
-                limit=min(limit + offset, 500),
+                until=until,               # NUEVO
+                source=fuente,             # NUEVO
+                limit=limit,               # NUEVO (paginación real en SQL)
+                offset=offset,             # NUEVO
             )
             data = [{
                 "title": r["title"],
@@ -153,34 +165,36 @@ def _query(
         data = [y for y in (_safe_normalize(i) for i in raw) if y]
         source = "JSON"
 
-    # 3) Filtros comunes (se apliquen vengan de DB o JSON)
-    # fecha inferior (desde)
-    if desde:
-        dt_desde = _ts(desde)
-        if dt_desde:
-            data = [x for x in data if _ts(x.get("date")) >= dt_desde]
+    # 3) Filtros SOLO para fallback JSON (en DB ya se aplicaron)
+    if source != "DB":                          # NUEVO
+        # fecha inferior (desde)
+        if desde:
+            dt_desde = _ts(desde)
+            if dt_desde:
+                data = [x for x in data if _ts(x.get("date")) >= dt_desde]
 
-    # fecha superior (hasta)  ← NUEVO
-    if hasta:
-        dt_hasta = _ts(hasta)
-        if dt_hasta:
-            data = [x for x in data if _ts(x.get("date")) <= dt_hasta]
+        # fecha superior (hasta)  ← recuerda: aquí 'hasta' NO está normalizado
+        if hasta:
+            dt_hasta = _ts(hasta)
+            if dt_hasta:
+                data = [x for x in data if _ts(x.get("date")) <= dt_hasta]
 
-    # categoria (match exacto, por si el DAL no lo aplicó o para JSON)
-    if categoria:
-        c = categoria.strip().lower()
-        data = [x for x in data if (x.get("category") or "").lower() == c]
+        # categoria
+        if categoria:
+            c = categoria.strip().lower()
+            data = [x for x in data if (x.get("category") or "").lower() == c]
 
-    # fuente (case-insensitive exacto)  ← NUEVO
-    if fuente:
-        f = fuente.strip().lower()
-        data = [x for x in data if (x.get("source") or "").strip().lower() == f]
+        # fuente (case-insensitive exacto)
+        if fuente:
+            f = fuente.strip().lower()
+            data = [x for x in data if (x.get("source") or "").strip().lower() == f]
 
-    # texto (busca en título + fuente; re-aplicar no pasa nada)
-    if texto:
-        t = (texto or "").strip().lower()
-        if t:
-            data = [x for x in data if t in (x.get("title","") + " " + (x.get("source") or "")).lower()]
+        # texto (título + fuente)
+        if texto:
+            t = (texto or "").strip().lower()
+            if t:
+                data = [x for x in data if t in (x.get("title","") + " " + (x.get("source") or "")).lower()]
+
 
     # 4) Orden fecha desc + canonical_url como desempate
     data.sort(

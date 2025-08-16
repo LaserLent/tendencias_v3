@@ -1,0 +1,241 @@
+--- a/api/app.py+++ b/api/app.py@@ -96,6 +96,7 @@     hasta: Optional[datetime] = Query(default=None, description="Fecha ISO inclusive, ej: 2025-08-07T23:59:59+02:00"),
+     fuente: Optional[str] = Query(default=None, description="Filtro exacto por fuente, ej: 'Xataka' o 'Reddit r/technology'"),
+     texto: Optional[str] = Query(default=None),
++    type: Optional[str] = Query(default=None, description="Tipo de ingesta: rss | subreddit | youtube"),
+     limit: int = Query(default=100, ge=1, le=1000),
+     offset: int = Query(default=0, ge=0),
+ ):
+@@ -104,18 +105,19 @@     hs = hasta.isoformat() if hasta else None
+ 
+     try:
+-        window = _query(categoria, ds, hs, texto, fuente, limit=limit, offset=offset)  # FIX
++        window = _query(categoria, ds, hs, texto, fuente, limit=limit, offset=offset, tipo=type)  # FIX
+ 
+         if HAS_DB_COUNT:  # NUEVO
+             total = get_articles_count(
+             category=categoria,
+             text=texto,
+-            since=dS,
++            since=ds,
+             until=_normalize_until(hs),  # NUEVO: límite EXCLUSIVO
+             source=fuente,
++            type=type,
+             )
+         else:  # NUEVO: fallback JSON (menos eficiente, pero solo si no hay DB)
+-            total = len(_query(categoria, ds, hs, texto, fuente, limit=10**9, offset=0))
++            total = len(_query(categoria, ds, hs, texto, fuente, limit=10**9, offset=0, tipo=type))
+         out = [{
+             "title": x.get("title") or "",
+             "url": x.get("url") or "",
+@@ -131,7 +133,7 @@         etag_raw = "|".join([
+             str(total), str(limit), str(offset),
+             categoria or "", ds or "", hs or "",
+-            texto or "", fuente or "",
++            texto or "", fuente or "", (type or ""),
+             first_date, last_date
+         ])
+         etag = hashlib.md5(etag_raw.encode("utf-8")).hexdigest()
+@@ -147,4 +149,4 @@         return resp
+     except Exception:
+         logger.exception("ITEMS_500")
+-        raise HTTPException(status_code=500, detail="Internal server error")
++        raise HTTPException(status_code=500, detail="Internal server error")
+--- a/api/helpers.py+++ b/api/helpers.py@@ -126,7 +126,8 @@     texto: Optional[str],
+     fuente: Optional[str],         
+     limit: int,
+-    offset: int
++    offset: int,
++    tipo: Optional[str] = None
+ ) -> list:
+     data: list = []
+     source = "UNKNOWN"
+@@ -138,10 +139,11 @@                 category=categoria,
+                 text=texto,
+                 since=desde,
+-                until=until,               # NUEVO
+-                source=fuente,             # NUEVO
+-                limit=limit,               # NUEVO (paginación real en SQL)
+-                offset=offset,             # NUEVO
++                until=until,
++                source=fuente,
++                type=tipo,
++                limit=limit,
++                offset=offset,
+             )
+             data = [{
+                 "title": r["title"],
+@@ -164,6 +166,9 @@         raw = _load_items()
+         data = [y for y in (_safe_normalize(i) for i in raw) if y]
+         source = "JSON"
++        if tipo:
++            # No re-filtrar por tipo en fallback JSON para evitar divergencias con DB
++            return []
+ 
+     # 3) Filtros SOLO para fallback JSON (en DB ya se aplicaron)
+     if source != "DB":                          # NUEVO
+@@ -244,4 +249,4 @@     # opcionales por si los importas en el futuro:
+     "normalize",
+     "ts",
+-]
++]
+--- a/core/db.py+++ b/core/db.py@@ -71,6 +71,7 @@               date  TEXT,                   -- ISO8601
+               source TEXT,                  -- Reddit r/..., MIT Tech Review, ...
+               category TEXT,                -- CIENCIA / TECNOLOGIA / CULTURA / OTROS / ...
++              source_type TEXT,           -- rss | subreddit | youtube
+               created_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             """)
+@@ -80,6 +81,18 @@             ON articles(canonical_url);
+             """)
+             conn.execute("CREATE INDEX IF NOT EXISTS ix_articles_date ON articles(date);")
++            # --- MIGRACIÓN idempotente: source_type ---
++            try:
++                cols = [r[1] for r in conn.execute("PRAGMA table_info('articles')").fetchall()]
++                if 'source_type' not in cols:
++                    conn.execute("ALTER TABLE articles ADD COLUMN source_type TEXT")
++            except Exception:
++                pass
++            # Índice opcional para consultas por type+date
++            try:
++                conn.execute("CREATE INDEX IF NOT EXISTS ix_articles_source_type_date ON articles(source_type, date)")
++            except Exception:
++                pass
+             conn.execute("CREATE INDEX IF NOT EXISTS ix_articles_category ON articles(category);")
+             
+     finally:
+@@ -111,8 +124,8 @@ 
+             # 2) UPSERT atómico (inserta o actualiza campos)
+             conn.execute("""
+-                INSERT INTO articles (title, url, canonical_url, date, source, category)
+-                VALUES (:title, :url, :canonical_url, :date, :source, UPPER(:category))
++                INSERT INTO articles (title, url, canonical_url, date, source, category, source_type)
++                VALUES (:title, :url, :canonical_url, :date, :source, UPPER(:category), :source_type)
+                 ON CONFLICT(canonical_url) DO UPDATE SET
+                     title   = excluded.title,
+                     url     = excluded.url,
+@@ -129,7 +142,8 @@                                 WHEN excluded.category IS NULL OR excluded.category = 'OTROS'
+                                      THEN articles.category
+                                 ELSE UPPER(excluded.category)
+-                              END
++                              END,
++                    source_type = COALESCE(excluded.source_type, articles.source_type)
+             """, {
+                 "title": rec.get("title"),
+                 "url": rec.get("url"),
+@@ -137,6 +151,7 @@                 "date": rec.get("date"),
+                 "source": rec.get("source"),
+                 "category": rec.get("category"),
++                "source_type": rec.get("source_type"),
+             })
+             # 3) Si no existía, fue INSERT; si existía, fue UPDATE
+             return not existed
+@@ -151,6 +166,7 @@     since: Optional[str]=None,         # ISO8601 (inclusive)
+     until: Optional[str]=None,         # NUEVO: límite EXCLUSIVO (normalizado en la API)
+     source: Optional[str]=None,        # filtro por fuente (igualdad, no LIKE)
++    type: Optional[str]=None,          # NUEVO: filtro por tipo de ingesta
+     offset: int=0,                     # paginación real en SQL
+     limit: int=50,
+     conn: Optional[sqlite3.Connection]=None
+@@ -194,6 +210,10 @@         if source is not None:
+             where.append("source = :source COLLATE NOCASE")  # NUEVO
+             params["source"] = source                         # NUEVO
++
++        if type:
++            where.append("source_type = :type COLLATE NOCASE")
++            params["type"] = type
+ 
+         sql = "SELECT id, title, url, canonical_url, date, source, category FROM articles"
+         if where:
+@@ -344,3 +364,48 @@             )
+             total += cur.rowcount
+     return total
++
++
++def get_articles_count(
++    *,
++    category: Optional[str]=None,
++    text: Optional[str]=None,
++    since: Optional[str]=None,
++    until: Optional[str]=None,
++    source: Optional[str]=None,
++    type: Optional[str]=None,
++    conn: Optional[sqlite3.Connection]=None
++) -> int:
++    """Devuelve el total de artículos que cumplen los filtros (para X-Total-Count)."""
++    close_later = False
++    if conn is None:
++        conn, close_later = get_conn(), True
++    try:
++        where = []
++        params: Dict[str, Any] = {}
++        if category:
++            where.append("category = :category")
++            params["category"] = category
++        if since:
++            where.append("date >= CASE WHEN typeof(date)='integer' THEN strftime('%s', :since) ELSE :since END")
++            params["since"] = since
++        if until:
++            where.append("date < CASE WHEN typeof(date)='integer' THEN strftime('%s', :until) ELSE :until END")
++            params["until"] = until
++        if text:
++            where.append("(LOWER(title) LIKE :text OR LOWER(IFNULL(source,'')) LIKE :text)")
++            params["text"] = f"%{text.lower()}%"
++        if source is not None:
++            where.append("source = :source COLLATE NOCASE")
++            params["source"] = source
++        if type:
++            where.append("source_type = :type COLLATE NOCASE")
++            params["type"] = type
++        sql = "SELECT COUNT(*) AS c FROM articles"
++        if where:
++            sql += " WHERE " + " AND ".join(where)
++        row = conn.execute(sql, params).fetchone()
++        return int(row["c"] if isinstance(row, sqlite3.Row) else row[0])
++    finally:
++        if close_later:
++            conn.close()
+
+--- a/services/ingest.py+++ b/services/ingest.py@@ -258,9 +258,27 @@ def ingest_now() -> Dict[str, int]:
+     """Recoge fuentes, normaliza y hace upsert en SQLite. Devuelve contadores."""
+     items: List[dict] = []
+-    items += (obtener_noticias_recientes() or [])
+-    items += (obtener_de_reddit() or [])
+-    items += (obtener_de_youtube() or [])
++    _rss = (obtener_noticias_recientes() or [])
++    for _it in _rss:
++        try:
++            _it['type'] = 'rss'
++        except Exception:
++            pass
++    items += _rss
++    _rdt = (obtener_de_reddit() or [])
++    for _it in _rdt:
++        try:
++            _it['type'] = 'subreddit'
++        except Exception:
++            pass
++    items += _rdt
++    _yt = (obtener_de_youtube() or [])
++    for _it in _yt:
++        try:
++            _it['type'] = 'youtube'
++        except Exception:
++            pass
++    items += _yt
+ 
+     init_db()
+     ins = upd = 0
+@@ -294,6 +312,7 @@                     "date": date,
+                     "source": src,
+                     "category": cat,
++                    "source_type": it.get('type'),
+                 }
+                 ok = upsert_article(rec, conn=conn)
+             except TypeError:
+@@ -306,6 +325,7 @@                     date=date,
+                     source=src,
+                     category=cat,
++                    source_type=it.get('type'),
+                 )
+ 
+             if ok is True or ok == "inserted":
