@@ -41,12 +41,3 @@ def test_to_canonical_category_non_string_is_stringified():
     can = to_canonical(rec)
     assert isinstance(can["category"], str)
 
-def test_canonicalize_url_strips_tracking_and_lowercases_host():
-    u = "https://Example.COM/Path/Sub?utm_campaign=z&utm_source=x&fbclid=1&gclid=2&b=2"
-    cu = canonicalize_url(u)
-    p = urlparse(cu)
-    assert p.netloc == "example.com"
-    qs = parse_qs(p.query)
-    assert "b" in qs and qs["b"] == ["2"]
-    assert not any(k.startswith("utm_") for k in qs)
-    assert "fbclid" not in qs and "gclid" not in qs

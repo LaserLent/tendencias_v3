@@ -1,0 +1,52 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        py: ["3.10", "3.11"]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests (pytest + coverage)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m pytest -q \
+            --cov=core --cov=services --cov=api \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Enforce coverage >= 70%
+        run: |
+          python - << 'PY'
+          import sys, xml.etree.ElementTree as ET
+          cov = ET.parse("coverage.xml").getroot().attrib.get("line-rate")
+          pct = float(cov) * 100 if cov else 0.0
+          print(f"Coverage: {pct:.2f}%")
+          sys.exit(0 if pct >= 70.0 else 1)
+          PY
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.py }}
+          path: coverage.xml
