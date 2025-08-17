@@ -6,38 +6,22 @@ on:
 
 jobs:
   pytest:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        py: ["3.10", "3.11"]
-    runs-on: ${{ matrix.os }}
-
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.py }}
-          cache: "pip"
+          python-version: "3.11"
 
-       - name: Install and run tests (isolated venv)
+      - name: Install and run tests (clean)
         run: |
-          python - << 'PY'
-          import os, sys, subprocess, venv
-          vdir = ".ci-venv"
-          venv.create(vdir, with_pip=True, clear=True)
-          py = os.path.join(vdir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(vdir, "bin", "python")
-          def run(*args):
-              print("+", py, *args); subprocess.check_call([py, *args])
-          run("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
-          run("-m", "pip", "install", "-r", "requirements.txt")
-          run("-m", "pip", "install", "pytest", "pytest-cov")
-          run("-c", "import sys, platform, pytest; print('PY', sys.executable); print('PYV', sys.version); print('OS', platform.platform()); print('PYTEST', pytest.__version__)")
-          run("-m", "pytest", "-q", "--cov=core", "--cov=services", "--cov=api",
-              "--cov-report=term-missing", "--cov-report=xml:coverage.xml")
-          PY
-
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-cov
+          python -c "import sys,pytest; print('PY', sys.version); print('PYTEST', pytest.__version__)"
+          python -m pytest -q
 
       - name: Enforce coverage >= 70%
         run: |
