@@ -21,16 +21,15 @@ jobs:
           python-version: ${{ matrix.py }}
           cache: "pip"
 
-      - name: Install and run tests (isolated venv)
-        env:
-          PYTHONPATH: ${{ github.workspace }}
+       - name: Install and run tests (isolated venv)
         run: |
           python - << 'PY'
           import os, sys, subprocess, venv
-          venv_dir = ".ci-venv"
-          venv.create(venv_dir, with_pip=True, clear=True)
-          py = os.path.join(venv_dir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(venv_dir, "bin", "python")
-          def run(*args): print("+", *args); subprocess.check_call([py, *args])
+          vdir = ".ci-venv"
+          venv.create(vdir, with_pip=True, clear=True)
+          py = os.path.join(vdir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(vdir, "bin", "python")
+          def run(*args): 
+              print("+", py, *args); subprocess.check_call([py, *args])
           run("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
           run("-m", "pip", "install", "-r", "requirements.txt")
           run("-m", "pip", "install", "pytest", "pytest-cov")
@@ -38,6 +37,7 @@ jobs:
           run("-m", "pytest", "-q", "--cov=core", "--cov=services", "--cov=api",
               "--cov-report=term-missing", "--cov-report=xml:coverage.xml")
           PY
+
 
 
       - name: Enforce coverage >= 70%
