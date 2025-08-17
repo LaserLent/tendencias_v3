@@ -21,16 +21,24 @@ jobs:
           python-version: ${{ matrix.py }}
           cache: "pip"
 
-      - name: Install and run tests
+       - name: Install and run tests (isolated venv)
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-cov
-          python -c "import sys, platform; print('PY', sys.version); print('OS', platform.platform()); import pytest; print('pytest', pytest.__version__)"
-          python -m pytest -q --cov=core --cov=services --cov=api --cov-report=term-missing --cov-report=xml:coverage.xml
-  
+          python - << 'PY'
+          import os, sys, subprocess, venv, platform
+          venv_dir = ".ci-venv"
+          venv.create(venv_dir, with_pip=True, clear=True)
+          py = os.path.join(venv_dir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(venv_dir, "bin", "python")
+          def run(*args): 
+              print("+", *args); subprocess.check_call([py, *args])
+          run("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
+          run("-m", "pip", "install", "-r", "requirements.txt")
+          run("-m", "pip", "install", "pytest", "pytest-cov")
+          run("-c", "import sys,site,pytest; print('PY', sys.executable); print('PYV', sys.version); print('SITE', site.getsitepackages()); print('PYTEST', pytest.__version__)")
+          run("-m", "pytest", "-q", "--cov=core", "--cov=services", "--cov=api", "--cov-report=term-missing", "--cov-report=xml:coverage.xml")
+          PY
+
 
       - name: Enforce coverage >= 70%
         run: |
