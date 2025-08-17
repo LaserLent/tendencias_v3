@@ -28,7 +28,7 @@ jobs:
           vdir = ".ci-venv"
           venv.create(vdir, with_pip=True, clear=True)
           py = os.path.join(vdir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(vdir, "bin", "python")
-          def run(*args): 
+          def run(*args):
               print("+", py, *args); subprocess.check_call([py, *args])
           run("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
           run("-m", "pip", "install", "-r", "requirements.txt")
@@ -37,7 +37,6 @@ jobs:
           run("-m", "pytest", "-q", "--cov=core", "--cov=services", "--cov=api",
               "--cov-report=term-missing", "--cov-report=xml:coverage.xml")
           PY
-
 
 
       - name: Enforce coverage >= 70%
