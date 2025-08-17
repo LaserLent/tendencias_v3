@@ -1,6 +1,6 @@
 import json, re
 from pathlib import Path
-
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 PROFILE_JSON = "canal_brief_master_v39.json"
 
 def _load_profile():
@@ -71,18 +71,50 @@ _TRACKING_PARAMS = {
     "gclid","fbclid","igshid","mc_cid","mc_eid","spm","vero_conv","vero_id"
 }
 
-def canonicalize_url(url: str) -> str:
-    if not url:
+# Añade arriba:
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
+# Reemplaza la función por esta versión robusta:
+def canonicalize_url(u: str) -> str:
+    if not u:
         return ""
     try:
-        u = urlparse(url)
-        scheme = "https" if u.scheme in ("http","https","") else u.scheme
-        netloc = (u.netloc or "").lower()
-        if netloc.startswith("www."):
-            netloc = netloc[4:]
-        path = (u.path or "").rstrip("/")
-        query_pairs = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if k not in _TRACKING_PARAMS]
-        query = urlencode(query_pairs, doseq=True)
-        return urlunparse((scheme, netloc, path, "", query, ""))
+        p = urlparse(u.strip())
+
+        scheme = (p.scheme or "").lower()
+        host = (p.hostname or "").lower()
+        port = p.port
+        # quita puertos por defecto
+        if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+            netloc = f"{host}:{port}"
+        else:
+            netloc = host
+
+        # --- limpiar query ---
+        TRACKING_PREFIXES = ("utm",)   # <— ojo: 'utm' a secas y cualquier 'utm*'
+        TRACKING_KEYS = {
+            "gclid","fbclid","igshid","mc_cid","mc_eid",
+            "ref_src","ref_url","spm","si","siid","mkt_tok"
+        }
+
+        kept = []
+        for k, v in parse_qsl(p.query, keep_blank_values=True):
+            lk = k.lower()
+            # elimina si es 'utm' o empieza por 'utm' (utm, utm_source, utmX, etc.) o si está en lista
+            if lk == "utm" or lk.startswith(TRACKING_PREFIXES) or lk in TRACKING_KEYS:
+                continue
+            kept.append((k, v))
+
+        # orden estable
+        kept.sort(key=lambda kv: (kv[0], kv[1]))
+        query = urlencode(kept, doseq=True)
+
+        # sin fragmento
+        fragment = ""
+
+        # conserva la ruta (si está vacía, pon '/')
+        path = p.path or "/"
+
+        return urlunparse((scheme, netloc, path, p.params, query, fragment))
     except Exception:
-        return url  # fail-safe
+        return u.strip()

@@ -32,7 +32,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     Tablas:
       - taxonomy(id, name, parent_id)
       - sources(id, name, kind, url, enabled)
-      - articles(id, title, url, canonical_url, date, source, category, created_at)
+      - articles(id, title, url, canonical_url, date, source, category, created_at, source_type)
     Índices:
       - UNIQUE(canonical_url) para dedupe simple y robusto.
       - idx por fecha y categoría para filtros de API.
@@ -42,6 +42,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
         conn, close_later = get_conn(), True
     try:
         with conn:
+            # --- Esquema base ---
             conn.execute("""
             CREATE TABLE IF NOT EXISTS taxonomy (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,10 +82,20 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS ix_articles_date ON articles(date);")
             conn.execute("CREATE INDEX IF NOT EXISTS ix_articles_category ON articles(category);")
-            
+
+            # --- MIGRACIÓN: asegurar columna e índice (idempotente) ---
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info('articles')")]
+            if "source_type" not in cols:
+                conn.execute("ALTER TABLE articles ADD COLUMN source_type TEXT")
+            # Crear siempre el índice (puede faltar en bases antiguas)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_articles_source_type_date ON articles(source_type, date)"
+            )
+
     finally:
         if close_later:
             conn.close()
+
 
 def upsert_article(rec: Dict[str, Any], conn: Optional[sqlite3.Connection] = None) -> bool:
     """
@@ -111,25 +122,41 @@ def upsert_article(rec: Dict[str, Any], conn: Optional[sqlite3.Connection] = Non
 
             # 2) UPSERT atómico (inserta o actualiza campos)
             conn.execute("""
-                INSERT INTO articles (title, url, canonical_url, date, source, category)
-                VALUES (:title, :url, :canonical_url, :date, :source, UPPER(:category))
+                INSERT INTO articles (title, url, canonical_url, date, source, category, source_type)
+                VALUES (:title, :url, :canonical_url, :date, :source, UPPER(TRIM(:category)), :source_type)
                 ON CONFLICT(canonical_url) DO UPDATE SET
                     title   = excluded.title,
                     url     = excluded.url,
                     source  = excluded.source,
-                    -- conserva la fecha más reciente
+
+                    -- Conserva la fecha "más reciente" de forma robusta
+                    -- Comparando SIEMPRE en segundos epoch, tanto si vienen como ISO (TEXT) como INTEGER.
                     date    = CASE
                                 WHEN excluded.date IS NULL THEN articles.date
                                 WHEN articles.date IS NULL THEN excluded.date
-                                WHEN excluded.date > articles.date THEN excluded.date
+                                WHEN
+                                  CAST(CASE
+                                         WHEN typeof(excluded.date) = 'integer' THEN excluded.date
+                                         ELSE strftime('%s', excluded.date)
+                                       END AS INTEGER)
+                                  >
+                                  CAST(CASE
+                                         WHEN typeof(articles.date) = 'integer' THEN articles.date
+                                         ELSE strftime('%s', articles.date)
+                                       END AS INTEGER)
+                                  THEN excluded.date
                                 ELSE articles.date
                               END,
-                    -- no degradar a OTROS si ya teníamos algo mejor
-                    category= CASE
-                                WHEN excluded.category IS NULL OR excluded.category = 'OTROS'
-                                     THEN articles.category
-                                ELSE UPPER(excluded.category)
-                              END
+
+                    -- No machacar con 'OTROS' ni con vacío; normaliza a MAYÚSCULAS y TRIM
+                    category = CASE
+                                 WHEN excluded.category IS NULL OR UPPER(TRIM(excluded.category)) IN ('', 'OTROS')
+                                      THEN articles.category
+                                 ELSE UPPER(TRIM(excluded.category))
+                               END,
+
+                    -- Completar tipo si llega ahora; mantener el previo si no
+                    source_type = COALESCE(excluded.source_type, articles.source_type)
             """, {
                 "title": rec.get("title"),
                 "url": rec.get("url"),
@@ -137,7 +164,9 @@ def upsert_article(rec: Dict[str, Any], conn: Optional[sqlite3.Connection] = Non
                 "date": rec.get("date"),
                 "source": rec.get("source"),
                 "category": rec.get("category"),
+                "source_type": rec.get("source_type"),
             })
+
             # 3) Si no existía, fue INSERT; si existía, fue UPDATE
             return not existed
     finally:
@@ -151,6 +180,7 @@ def get_articles(
     since: Optional[str]=None,         # ISO8601 (inclusive)
     until: Optional[str]=None,         # NUEVO: límite EXCLUSIVO (normalizado en la API)
     source: Optional[str]=None,        # filtro por fuente (igualdad, no LIKE)
+    type: Optional[str]=None,  
     offset: int=0,                     # paginación real en SQL
     limit: int=50,
     conn: Optional[sqlite3.Connection]=None
@@ -163,6 +193,7 @@ def get_articles(
     - source: igualdad case-insensitive.
     """
     close_later = False
+
     if conn is None:
         conn, close_later = get_conn(), True
     try:
@@ -193,7 +224,11 @@ def get_articles(
 
         if source is not None:
             where.append("source = :source COLLATE NOCASE")  # NUEVO
-            params["source"] = source                         # NUEVO
+            params["source"] = source    
+            # NUEVO
+        if type is not None:
+            where.append("source_type = :stype COLLATE NOCASE")
+            params["stype"] = type    
 
         sql = "SELECT id, title, url, canonical_url, date, source, category FROM articles"
         if where:
@@ -210,6 +245,48 @@ def get_articles(
         if close_later:
             conn.close()
 
+def get_articles_count(
+    *,
+    category: Optional[str]=None,
+    text: Optional[str]=None,
+    since: Optional[str]=None,
+    until: Optional[str]=None,
+    source: Optional[str]=None,
+    type: Optional[str]=None,
+    conn: Optional[sqlite3.Connection]=None
+) -> int:
+    close_later = False
+    if conn is None:
+        conn, close_later = get_conn(), True
+    try:
+        where, params = [], {}
+        if category:
+            where.append("category = :category")
+            params["category"] = category
+        if since:
+            where.append("date >= CASE WHEN typeof(date)='integer' THEN strftime('%s', :since) ELSE :since END")
+            params["since"] = since
+        if until:
+            where.append("date < CASE WHEN typeof(date)='integer' THEN strftime('%s', :until) ELSE :until END")
+            params["until"] = until
+        if text:
+            where.append("(LOWER(title) LIKE :text OR LOWER(IFNULL(source,'')) LIKE :text)")
+            params["text"] = f"%{text.lower()}%"
+        if source is not None:
+            where.append("source = :source COLLATE NOCASE")
+            params["source"] = source
+        if type is not None:
+            where.append("source_type = :stype COLLATE NOCASE")
+            params["stype"] = type
+
+        sql = "SELECT COUNT(*) AS c FROM articles"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        row = conn.execute(sql, params).fetchone()
+        return int(row["c"] if row and "c" in row.keys() else 0)
+    finally:
+        if close_later:
+            conn.close()
 
 def get_stats(conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
     """
@@ -228,6 +305,8 @@ def get_stats(conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
             # ---------------------------
 # Configuración: sources y taxonomy
 # ---------------------------
+
+
 
 from typing import List
 

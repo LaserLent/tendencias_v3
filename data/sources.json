@@ -15,6 +15,13 @@
       "category": "TECNOLOGIA",
       "enabled": true,
       "interval_minutes": 30
+    },
+    {
+      "name": "Xataka",
+      "type": "rss",
+      "url": "https://www.xataka.com/index.xml",
+      "category": "TECNOLOGIA",
+      "enabled": true
     }
   ]
 }

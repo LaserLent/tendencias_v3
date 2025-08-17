@@ -126,7 +126,8 @@ def _query(
     texto: Optional[str],
     fuente: Optional[str],         
     limit: int,
-    offset: int
+    offset: int,
+    tipo: Optional[str] = None
 ) -> list:
     data: list = []
     source = "UNKNOWN"
@@ -141,6 +142,7 @@ def _query(
                 until=until,               # NUEVO
                 source=fuente,             # NUEVO
                 limit=limit,               # NUEVO (paginación real en SQL)
+                type=tipo,  
                 offset=offset,             # NUEVO
             )
             data = [{

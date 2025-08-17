@@ -1,8 +1,9 @@
-# api/app.py
 from fastapi import FastAPI, Query, Request, HTTPException
 from typing import Optional
 from datetime import datetime, timedelta
 import hashlib, os, logging
+from contextlib import asynccontextmanager
+
 
 from api.helpers import (
     DATA_PATH,
@@ -34,17 +35,15 @@ if not logger.handlers:
 logger.setLevel(logging.INFO)
 logger.propagate = False
 
-# Seguridad básica
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    resp = await call_next(request)
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["Referrer-Policy"] = "no-referrer"
-    return resp
+
 
 # Auto-ingesta opcional al arrancar
-@app.on_event("startup")
-def _auto_ingest_on_start():
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # === STARTUP: 
     if os.getenv("AUTO_INGEST_ON_START", "0") == "1":
         try:
             from services.ingest import ingest_now
@@ -52,6 +51,19 @@ def _auto_ingest_on_start():
             logger.info("AUTO_INGEST_ON_START OK %s", stats)
         except Exception:
             logger.exception("AUTO_INGEST_ON_START FAILED")
+    yield
+    # === SHUTDOWN (si necesitas cerrar recursos en el futuro) ===
+    # p.ej.: cerrar pools, schedulers, etc.
+
+app = FastAPI(title="Tendencias API", version="0.1.7", lifespan=lifespan)
+
+# Seguridad básica
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 @app.get("/health")
 def health():
@@ -96,6 +108,7 @@ def list_items(
     hasta: Optional[datetime] = Query(default=None, description="Fecha ISO inclusive, ej: 2025-08-07T23:59:59+02:00"),
     fuente: Optional[str] = Query(default=None, description="Filtro exacto por fuente, ej: 'Xataka' o 'Reddit r/technology'"),
     texto: Optional[str] = Query(default=None),
+    type: Optional[str] = Query(default=None, description="Tipo de ingesta: rss | subreddit | youtube"),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
@@ -104,15 +117,16 @@ def list_items(
     hs = hasta.isoformat() if hasta else None
 
     try:
-        window = _query(categoria, ds, hs, texto, fuente, limit=limit, offset=offset)  # FIX
+        window = _query(categoria, ds, hs, texto, fuente, limit=limit, offset=offset, tipo=type)  # FIX
 
         if HAS_DB_COUNT:  # NUEVO
             total = get_articles_count(
             category=categoria,
             text=texto,
-            since=dS,
+            since=ds,
             until=_normalize_until(hs),  # NUEVO: límite EXCLUSIVO
             source=fuente,
+            type=type, 
             )
         else:  # NUEVO: fallback JSON (menos eficiente, pero solo si no hay DB)
             total = len(_query(categoria, ds, hs, texto, fuente, limit=10**9, offset=0))
@@ -132,6 +146,7 @@ def list_items(
             str(total), str(limit), str(offset),
             categoria or "", ds or "", hs or "",
             texto or "", fuente or "",
+            type or "",
             first_date, last_date
         ])
         etag = hashlib.md5(etag_raw.encode("utf-8")).hexdigest()
