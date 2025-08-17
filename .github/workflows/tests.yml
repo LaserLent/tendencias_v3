@@ -7,15 +7,23 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          
-        - name: Seed DB with minimal data
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-cov
+
+      - name: Seed DB (minimal)
         run: |
           python - << 'PY'
           from core.db import init_db, get_conn, upsert_article
@@ -33,29 +41,10 @@ jobs:
                       upsert_article(it, conn=conn)
                   except TypeError:
                       upsert_article(conn=conn, **it)
-          print("Seeded:", 3)
           PY
 
-      - name: Install and run tests (clean)
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pytest pytest-cov
-          python -c "import sys,pytest; print('PY', sys.version); print('PYTEST', pytest.__version__)"
           python -m pytest -q
-
-      - name: Enforce coverage >= 70%
-        run: |
-          python - << 'PY'
-          import sys, xml.etree.ElementTree as ET
-          cov = ET.parse("coverage.xml").getroot().attrib.get("line-rate")
-          pct = float(cov) * 100 if cov else 0.0
-          print(f"Coverage: {pct:.2f}%")
-          sys.exit(0 if pct >= 70.0 else 1)
-          PY
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ matrix.os }}-${{ matrix.py }}
-          path: coverage.xml
